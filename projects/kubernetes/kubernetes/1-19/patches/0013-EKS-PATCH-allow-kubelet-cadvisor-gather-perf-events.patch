@@ -1,0 +1,78 @@
+diff --git a/cmd/kubelet/app/options/options.go b/cmd/kubelet/app/options/options.go
+index 7e4f8fd18a1..799dcfddab2 100644
+--- a/cmd/kubelet/app/options/options.go
++++ b/cmd/kubelet/app/options/options.go
+@@ -144,7 +144,8 @@ type KubeletFlags struct {
+ 	ExitOnLockContention bool
+ 	// seccompProfileRoot is the directory path for seccomp profiles.
+ 	SeccompProfileRoot string
+-
++	// Path to a JSON file containing cAdvisor configuration of perf events to measure. Empty value disabled perf events measuring.
++	CAdvisorPerfEventsConfig string
+ 	// DEPRECATED FLAGS
+ 	// minimumGCAge is the minimum age for a finished container before it is
+ 	// garbage collected.
+@@ -351,6 +352,7 @@ func (f *KubeletFlags) AddFlags(mainfs *pflag.FlagSet) {
+ 	fs.Var(&bindableNodeLabels, "node-labels", fmt.Sprintf("<Warning: Alpha feature> Labels to add when registering the node in the cluster.  Labels must be key=value pairs separated by ','. Labels in the 'kubernetes.io' namespace must begin with an allowed prefix (%s) or be in the specifically allowed set (%s)", strings.Join(kubeletapis.KubeletLabelNamespaces(), ", "), strings.Join(kubeletapis.KubeletLabels(), ", ")))
+ 	fs.StringVar(&f.LockFilePath, "lock-file", f.LockFilePath, "<Warning: Alpha feature> The path to file for kubelet to use as a lock file.")
+ 	fs.BoolVar(&f.ExitOnLockContention, "exit-on-lock-contention", f.ExitOnLockContention, "Whether kubelet should exit upon lock-file contention.")
++	fs.StringVar(&f.CAdvisorPerfEventsConfig, "cadvisor-perf-events-config", f.CAdvisorPerfEventsConfig, "Path to a JSON file containing cAdvisor configuration of perf events to measure. Empty value disabled perf events measuring.")
+ 
+ 	// DEPRECATED FLAGS
+ 	fs.StringVar(&f.BootstrapKubeconfig, "experimental-bootstrap-kubeconfig", f.BootstrapKubeconfig, "")
+diff --git a/cmd/kubelet/app/server.go b/cmd/kubelet/app/server.go
+index 7baf008b5e7..5db39056428 100644
+--- a/cmd/kubelet/app/server.go
++++ b/cmd/kubelet/app/server.go
+@@ -626,7 +626,7 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
+ 
+ 	if kubeDeps.CAdvisorInterface == nil {
+ 		imageFsInfoProvider := cadvisor.NewImageFsInfoProvider(s.ContainerRuntime, s.RemoteRuntimeEndpoint)
+-		kubeDeps.CAdvisorInterface, err = cadvisor.New(imageFsInfoProvider, s.RootDirectory, cgroupRoots, cadvisor.UsingLegacyCadvisorStats(s.ContainerRuntime, s.RemoteRuntimeEndpoint))
++		kubeDeps.CAdvisorInterface, err = cadvisor.New(imageFsInfoProvider, s.RootDirectory, cgroupRoots, cadvisor.UsingLegacyCadvisorStats(s.ContainerRuntime, s.RemoteRuntimeEndpoint), s.CAdvisorPerfEventsConfig)
+ 		if err != nil {
+ 			return err
+ 		}
+diff --git a/pkg/kubelet/cadvisor/cadvisor_linux.go b/pkg/kubelet/cadvisor/cadvisor_linux.go
+index 0c701cb98d3..ae4dc2c469d 100644
+--- a/pkg/kubelet/cadvisor/cadvisor_linux.go
++++ b/pkg/kubelet/cadvisor/cadvisor_linux.go
+@@ -85,7 +85,7 @@ func init() {
+ }
+ 
+ // New creates a new cAdvisor Interface for linux systems.
+-func New(imageFsInfoProvider ImageFsInfoProvider, rootPath string, cgroupRoots []string, usingLegacyStats bool) (Interface, error) {
++func New(imageFsInfoProvider ImageFsInfoProvider, rootPath string, cgroupRoots []string, usingLegacyStats bool, perfEventConfig string) (Interface, error) {
+ 	sysFs := sysfs.NewRealSysFs()
+ 
+ 	includedMetrics := cadvisormetrics.MetricSet{
+@@ -97,6 +97,7 @@ func New(imageFsInfoProvider ImageFsInfoProvider, rootPath string, cgroupRoots [
+ 		cadvisormetrics.AcceleratorUsageMetrics: struct{}{},
+ 		cadvisormetrics.AppMetrics:              struct{}{},
+ 		cadvisormetrics.ProcessMetrics:          struct{}{},
++		cadvisormetrics.PerfMetrics:             struct{}{},
+ 	}
+ 	if usingLegacyStats || utilfeature.DefaultFeatureGate.Enabled(kubefeatures.LocalStorageCapacityIsolation) {
+ 		includedMetrics[cadvisormetrics.DiskUsageMetrics] = struct{}{}
+@@ -109,7 +110,7 @@ func New(imageFsInfoProvider ImageFsInfoProvider, rootPath string, cgroupRoots [
+ 	}
+ 
+ 	// Create the cAdvisor container manager.
+-	m, err := manager.New(memory.New(statsCacheDuration, nil), sysFs, housekeepingConfig, includedMetrics, http.DefaultClient, cgroupRoots, "")
++	m, err := manager.New(memory.New(statsCacheDuration, nil), sysFs, housekeepingConfig, includedMetrics, http.DefaultClient, cgroupRoots,perfEventConfig)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/test/e2e_node/environment/conformance.go b/test/e2e_node/environment/conformance.go
+index 5deb26440f6..11d5fa7d037 100644
+--- a/test/e2e_node/environment/conformance.go
++++ b/test/e2e_node/environment/conformance.go
+@@ -99,7 +99,7 @@ func containerRuntime() error {
+ 	}
+ 
+ 	// Setup cadvisor to check the container environment
+-	c, err := cadvisor.New(cadvisor.NewImageFsInfoProvider("docker", ""), "/var/lib/kubelet", []string{"/"}, false)
++	c, err := cadvisor.New(cadvisor.NewImageFsInfoProvider("docker", ""), "/var/lib/kubelet", []string{"/"}, false, "")
+ 	if err != nil {
+ 		return printError("Container Runtime Check: %s Could not start cadvisor %v", failed, err)
+ 	}
